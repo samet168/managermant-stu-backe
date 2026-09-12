@@ -8,7 +8,7 @@ from sqlalchemy import func
 from app.core.dependencies import get_db, require_admin
 from app.core.security import get_password_hash
 from app.domain.models import (
-    User, SchoolClass, Enrollment, Attendance, Grade, Homework, Submission, Invoice
+    User, SchoolClass, Enrollment, Attendance, Grade, Homework, Submission, Invoice, ClassSubject
 )
 
 router = APIRouter(prefix="/admin", tags=["Admin Management & RBAC Flow"])
@@ -217,3 +217,107 @@ def create_teacher(
         "created_at": new_user.created_at,
         "message": f"បានបង្កើតគណនី {new_user.name} ដោយជោគជ័យ"
     }
+
+
+# =================== Subject Teacher Management (Admin) ===================
+
+class AssignSubjectRequest(BaseModel):
+    teacher_id: int
+    subject_name: str
+
+@router.get("/class-subjects")
+def get_all_class_subjects(admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """Get all class-subject-teacher assignments across all classes (admin view)."""
+    assignments = db.query(ClassSubject).all()
+    results = []
+    for s in assignments:
+        cls = db.query(SchoolClass).filter(SchoolClass.id == s.class_id).first()
+        teacher_obj = db.query(User).filter(User.id == s.teacher_id).first()
+        results.append({
+            "id": s.id,
+            "class_id": s.class_id,
+            "class_name": cls.name if cls else "",
+            "grade_level": cls.grade_level if cls else "",
+            "homeroom_teacher_id": cls.teacher_id if cls else None,
+            "teacher_id": s.teacher_id,
+            "teacher_name": teacher_obj.name if teacher_obj else "",
+            "teacher_email": teacher_obj.email if teacher_obj else "",
+            "subject_name": s.subject_name,
+            "created_at": s.created_at
+        })
+    return results
+
+@router.get("/classes/{class_id}/subjects")
+def get_class_subjects_admin(class_id: int, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """Get subject-teacher assignments for a specific class."""
+    school_class = db.query(SchoolClass).filter(SchoolClass.id == class_id).first()
+    if not school_class:
+        raise HTTPException(status_code=404, detail="រកមិនឃើញថ្នាក់រៀននេះទេ")
+    subjects = db.query(ClassSubject).filter(ClassSubject.class_id == class_id).all()
+    return [
+        {
+            "id": s.id,
+            "class_id": s.class_id,
+            "teacher_id": s.teacher_id,
+            "teacher_name": s.teacher.name if s.teacher else "",
+            "teacher_email": s.teacher.email if s.teacher else "",
+            "subject_name": s.subject_name,
+            "created_at": s.created_at
+        }
+        for s in subjects
+    ]
+
+@router.post("/classes/{class_id}/subjects")
+def assign_subject_to_class_admin(
+    class_id: int,
+    payload: AssignSubjectRequest,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Admin assigns a teacher to teach a specific subject in a class."""
+    school_class = db.query(SchoolClass).filter(SchoolClass.id == class_id).first()
+    if not school_class:
+        raise HTTPException(status_code=404, detail="រកមិនឃើញថ្នាក់រៀននេះទេ")
+    teacher_obj = db.query(User).filter(User.id == payload.teacher_id).first()
+    if not teacher_obj or teacher_obj.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=400, detail="សូមជ្រើសរើសគណនីគ្រូបង្រៀនត្រឹមត្រូវ")
+    subj_name = payload.subject_name.strip()
+    if not subj_name:
+        raise HTTPException(status_code=400, detail="សូមបញ្ចូលប្រាក់មុខវិជ្ជា")
+    existing = db.query(ClassSubject).filter(
+        ClassSubject.class_id == class_id,
+        ClassSubject.subject_name == subj_name
+    ).first()
+    if existing:
+        existing.teacher_id = teacher_obj.id
+        db.commit()
+        return {"success": True, "message": f"បានធ្វើបច្ចុប្បន្នភាពគ្រូបង្រៀនមុខវិជ្ជា {subj_name} ទៅ {teacher_obj.name}"}
+    new_sub = ClassSubject(
+        class_id=class_id,
+        teacher_id=teacher_obj.id,
+        subject_name=subj_name
+    )
+    db.add(new_sub)
+    db.commit()
+    db.refresh(new_sub)
+    return {
+        "success": True,
+        "id": new_sub.id,
+        "teacher_name": teacher_obj.name,
+        "subject_name": subj_name,
+        "message": f"បានចាត់តាំងលោកគ្រូ/អ្នកគ្រូ {teacher_obj.name} បង្រៀន {subj_name} ក្នុង {school_class.name}"
+    }
+
+@router.delete("/classes/{class_id}/subjects/{subject_id}")
+def delete_subject_assignment_admin(
+    class_id: int,
+    subject_id: int,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    sub = db.query(ClassSubject).filter(ClassSubject.id == subject_id, ClassSubject.class_id == class_id).first()
+    if not sub:
+        raise HTTPException(status_code=404, detail="រកមិនឃើញការចាត់តាំងនេះទេ")
+    db.delete(sub)
+    db.commit()
+    return {"success": True, "message": "បានដកការចាត់តាំងមុខវិជ្ជាដោយជោគជ័យ"}

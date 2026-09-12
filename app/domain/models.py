@@ -24,7 +24,7 @@ class User(Base):
     # Relationships
     taught_classes = relationship("SchoolClass", back_populates="teacher", cascade="all, delete-orphan")
     enrollments = relationship("Enrollment", back_populates="student", cascade="all, delete-orphan")
-    attendances = relationship("Attendance", back_populates="student", cascade="all, delete-orphan")
+    attendances = relationship("Attendance", back_populates="student", cascade="all, delete-orphan", foreign_keys="[Attendance.student_id]")
     grades = relationship("Grade", back_populates="student", cascade="all, delete-orphan")
     submissions = relationship("Submission", back_populates="student", cascade="all, delete-orphan")
     invoices = relationship("Invoice", back_populates="student", cascade="all, delete-orphan")
@@ -58,6 +58,25 @@ class SchoolClass(Base):
     attendances = relationship("Attendance", back_populates="school_class", cascade="all, delete-orphan")
     grades = relationship("Grade", back_populates="school_class", cascade="all, delete-orphan")
     homeworks = relationship("Homework", back_populates="school_class", cascade="all, delete-orphan")
+    subject_teachers = relationship("ClassSubject", back_populates="school_class", cascade="all, delete-orphan")
+
+
+class ClassSubject(Base):
+    __tablename__ = "class_subjects"
+
+    id = Column(Integer, primary_key=True, index=True)
+    class_id = Column(Integer, ForeignKey("classes.id", ondelete="CASCADE"), nullable=False)
+    teacher_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    subject_name = Column(String(100), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Relationships
+    school_class = relationship("SchoolClass", back_populates="subject_teachers")
+    teacher = relationship("User")
+
+    __table_args__ = (
+        UniqueConstraint("class_id", "subject_name", "teacher_id", name="uq_class_subject_teacher"),
+    )
 
 
 class Enrollment(Base):
@@ -84,18 +103,20 @@ class Attendance(Base):
     id = Column(Integer, primary_key=True, index=True)
     class_id = Column(Integer, ForeignKey("classes.id", ondelete="CASCADE"), nullable=False)
     student_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    teacher_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    subject = Column(String(100), nullable=True, default="ទូទៅ")
     date = Column(Date, nullable=False, index=True)
-    status = Column(String(20), nullable=False)  # 'present', 'absent', 'permission'
+    status = Column(String(20), nullable=False)  # 'present', 'absent', 'late', 'permission'
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
     school_class = relationship("SchoolClass", back_populates="attendances")
-    student = relationship("User", back_populates="attendances")
+    student = relationship("User", foreign_keys=[student_id], back_populates="attendances")
+    teacher = relationship("User", foreign_keys=[teacher_id])
 
     __table_args__ = (
-        CheckConstraint("status IN ('present', 'absent', 'permission')", name="check_attendance_status"),
-        UniqueConstraint("class_id", "student_id", "date", name="uq_class_student_date_attendance"),
+        CheckConstraint("status IN ('present', 'absent', 'late', 'permission')", name="check_attendance_status"),
     )
 
 
@@ -241,7 +262,8 @@ class Invoice(Base):
     id = Column(Integer, primary_key=True, index=True)
     student_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     title = Column(String(255), nullable=False)
-    amount = Column(Numeric(10, 2), nullable=False)
+    total_amount = Column(Numeric(10, 2), nullable=False)
+    paid_amount = Column(Numeric(10, 2), default=0.00)
     currency = Column(String(10), default="USD")
     status = Column(String(20), default="unpaid")
     due_date = Column(Date, nullable=True)

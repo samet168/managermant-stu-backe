@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.core.dependencies import get_db, require_teacher
 from app.domain.models import (
-    User, SchoolClass, Enrollment, Attendance, Grade, Homework, Submission
+    User, SchoolClass, Enrollment, Attendance, Grade, Homework, Submission, ClassSubject
 )
 from io import BytesIO
 from openpyxl import Workbook
@@ -14,7 +14,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from fastapi.responses import StreamingResponse
 from app.schemas.teacher import (
     CreateClassRequest, UpdateClassRequest, AddStudentRequest, UpdateStudentRequest,
-    SaveAttendanceRequest, SaveGradesRequest
+    SaveAttendanceRequest, SaveGradesRequest, AssignSubjectTeacherRequest
 )
 
 router = APIRouter(prefix="/teacher", tags=["Teacher Management Flow"])
@@ -76,30 +76,40 @@ def list_classes(teacher: User = Depends(require_teacher), db: Session = Depends
     if teacher.role == "admin":
         classes = db.query(SchoolClass).order_by(SchoolClass.id.asc()).all()
     else:
+        subject_class_ids = [cs.class_id for cs in db.query(ClassSubject.class_id).filter(ClassSubject.teacher_id == teacher.id).all()]
         classes = db.query(SchoolClass).filter(
-            SchoolClass.teacher_id == teacher.id
+            (SchoolClass.teacher_id == teacher.id) | (SchoolClass.id.in_(subject_class_ids))
         ).order_by(SchoolClass.id.asc()).all()
     
     results = []
     for c in classes:
         student_count = db.query(Enrollment).filter(Enrollment.class_id == c.id).count()
+        assigned_subjects = [cs.subject_name for cs in db.query(ClassSubject).filter(ClassSubject.class_id == c.id, ClassSubject.teacher_id == teacher.id).all()]
+        is_homeroom = (c.teacher_id == teacher.id or teacher.role == "admin")
         results.append({
             "id": c.id,
             "name": c.name,
             "grade_level": c.grade_level,
             "teacher_id": c.teacher_id,
+            "teacher_name": c.teacher.name if c.teacher else "គ្មានគ្រូបង្រៀន",
             "academic_year": c.academic_year,
             "created_at": c.created_at,
-            "student_count": student_count
+            "student_count": student_count,
+            "is_homeroom": is_homeroom,
+            "assigned_subjects": assigned_subjects
         })
     return results
 
 @router.post("/classes")
 def create_class(payload: CreateClassRequest, teacher: User = Depends(require_teacher), db: Session = Depends(get_db)):
+    target_teacher_id = teacher.id
+    if teacher.role == "admin" and payload.teacher_id:
+        target_teacher_id = payload.teacher_id
+
     new_class = SchoolClass(
         name=payload.name,
         grade_level=payload.grade_level,
-        teacher_id=teacher.id,
+        teacher_id=target_teacher_id,
         academic_year=payload.academic_year or "2025-2026"
     )
     db.add(new_class)
@@ -127,6 +137,8 @@ def update_class(
         school_class.grade_level = payload.grade_level.strip()
     if payload.academic_year is not None:
         school_class.academic_year = payload.academic_year.strip()
+    if payload.teacher_id is not None and teacher.role == "admin":
+        school_class.teacher_id = payload.teacher_id
         
     db.commit()
     db.refresh(school_class)
@@ -134,7 +146,8 @@ def update_class(
         "id": school_class.id,
         "name": school_class.name,
         "grade_level": school_class.grade_level,
-        "academic_year": school_class.academic_year
+        "academic_year": school_class.academic_year,
+        "teacher_id": school_class.teacher_id
     }}
 
 @router.delete("/classes/{class_id}")
@@ -300,20 +313,39 @@ class TransferStudentRequest(BaseModel):
 @router.get("/all-students")
 def get_all_students(teacher: User = Depends(require_teacher), db: Session = Depends(get_db)):
     """
-    Returns all students in the teacher's classes with full classroom and contact metadata.
+    Returns ONLY role='student' users in the teacher's classes.
+    Teachers and admins are strictly excluded from the response.
     """
     if teacher.role == "admin":
-        enrollments = db.query(Enrollment).all()
+        # Admin: all enrollments, but only for users with role='student'
+        enrollments = (
+            db.query(Enrollment)
+            .join(User, Enrollment.student_id == User.id)
+            .filter(User.role == "student")          # ← strict role filter
+            .all()
+        )
     else:
         teacher_classes = db.query(SchoolClass).filter(SchoolClass.teacher_id == teacher.id).all()
         class_ids = [c.id for c in teacher_classes]
-        enrollments = db.query(Enrollment).filter(Enrollment.class_id.in_(class_ids)).all() if class_ids else []
-        
+        if not class_ids:
+            return []
+        enrollments = (
+            db.query(Enrollment)
+            .join(User, Enrollment.student_id == User.id)
+            .filter(
+                Enrollment.class_id.in_(class_ids),
+                User.role == "student"               # ← strict role filter
+            )
+            .all()
+        )
+
     results = []
-    seen_ids = set()
+    seen_ids: set[int] = set()
+
     for enr in enrollments:
         stu = enr.student
-        if not stu or stu.id in seen_ids:
+        # Double-check: skip non-students even if somehow joined
+        if not stu or stu.role != "student" or stu.id in seen_ids:
             continue
         cls = enr.school_class
         results.append({
@@ -327,17 +359,26 @@ def get_all_students(teacher: User = Depends(require_teacher), db: Session = Dep
             "phone_number": stu.phone or "-",
             "gender": "male",
             "status": "active",
+            "role": "student",
             "class_id": cls.id if cls else None,
             "enrolled_class": cls.name if cls else "-",
             "class_name": cls.name if cls else "-",
             "grade_level": cls.grade_level if cls else "-",
             "roll_no": enr.roll_no,
-            "avatar_url": stu.avatar_url
+            "avatar_url": stu.avatar_url,
         })
         seen_ids.add(stu.id)
-        
+
+    # Admin also sees unassigned students (role='student', not in any class)
     if teacher.role == "admin":
-        unassigned = db.query(User).filter(User.role == "student", ~User.id.in_(seen_ids) if seen_ids else True).all()
+        unassigned = (
+            db.query(User)
+            .filter(
+                User.role == "student",              # ← strict role filter
+                ~User.id.in_(seen_ids) if seen_ids else True
+            )
+            .all()
+        )
         for stu in unassigned:
             results.append({
                 "id": stu.id,
@@ -350,14 +391,15 @@ def get_all_students(teacher: User = Depends(require_teacher), db: Session = Dep
                 "phone_number": stu.phone or "-",
                 "gender": "male",
                 "status": "active",
+                "role": "student",
                 "class_id": None,
                 "enrolled_class": "មិនទាន់មានថ្នាក់ (Unassigned)",
                 "class_name": "មិនទាន់មានថ្នាក់",
                 "grade_level": "-",
                 "roll_no": None,
-                "avatar_url": stu.avatar_url
+                "avatar_url": stu.avatar_url,
             })
-            
+
     return results
 
 @router.post("/students/{student_id}/transfer")
@@ -408,13 +450,26 @@ def delete_student_permanently(
     return {"success": True, "message": "បានលុបព័ត៌មានសិស្សចេញពីប្រព័ន្ធដោយជោគជ័យ"}
 
 @router.get("/attendance")
-def get_attendance(class_id: int, date_str: str, teacher: User = Depends(require_teacher), db: Session = Depends(get_db)):
+def get_attendance(
+    class_id: int,
+    date_str: str,
+    subject: Optional[str] = "ទូទៅ",
+    teacher: User = Depends(require_teacher),
+    db: Session = Depends(get_db)
+):
     school_class = db.query(SchoolClass).filter(SchoolClass.id == class_id).first()
     if not school_class:
         raise HTTPException(status_code=404, detail="រកមិនឃើញថ្នាក់រៀននេះទេ")
-    if school_class.teacher_id != teacher.id and teacher.role != "admin":
+        
+    is_subject_teacher = db.query(ClassSubject).filter(
+        ClassSubject.class_id == class_id,
+        ClassSubject.teacher_id == teacher.id
+    ).first() is not None
+
+    if school_class.teacher_id != teacher.id and not is_subject_teacher and teacher.role != "admin":
         raise HTTPException(status_code=403, detail="អ្នកគ្មានសិទ្ធិមើលវត្តមានថ្នាក់របស់គ្រូផ្សេងទេ")
 
+    target_subject = subject.strip() if subject and subject.strip() else "ទូទៅ"
     enrollments = db.query(Enrollment).filter(Enrollment.class_id == class_id).order_by(Enrollment.roll_no.asc()).all()
     parsed_date = datetime.strptime(date_str, "%Y-%m-%d").date()
     
@@ -424,13 +479,15 @@ def get_attendance(class_id: int, date_str: str, teacher: User = Depends(require
         att = db.query(Attendance).filter(
             Attendance.class_id == class_id,
             Attendance.student_id == u.id,
+            Attendance.subject == target_subject,
             Attendance.date == parsed_date
         ).first()
 
-        # Cumulative attendance stats for this student in this class
+        # Cumulative attendance stats for this student in this class strictly for this subject
         att_stats = db.query(Attendance.status, func.count(Attendance.id)).filter(
             Attendance.class_id == class_id,
-            Attendance.student_id == u.id
+            Attendance.student_id == u.id,
+            Attendance.subject == target_subject
         ).group_by(Attendance.status).all()
         stat_dict = {st: cnt for st, cnt in att_stats}
         present_cnt = stat_dict.get("present", 0)
@@ -445,6 +502,7 @@ def get_attendance(class_id: int, date_str: str, teacher: User = Depends(require
             "name": u.name,
             "student_code": u.student_code,
             "roll_no": e.roll_no,
+            "subject": target_subject,
             "status": att.status if att else "present",
             "notes": att.notes if att else None,
             "present_count": present_cnt,
@@ -462,25 +520,36 @@ def save_attendance(payload: SaveAttendanceRequest, teacher: User = Depends(requ
     school_class = db.query(SchoolClass).filter(SchoolClass.id == payload.class_id).first()
     if not school_class:
         raise HTTPException(status_code=404, detail="រកមិនឃើញថ្នាក់រៀននេះទេ")
-    if school_class.teacher_id != teacher.id and teacher.role != "admin":
+
+    is_subject_teacher = db.query(ClassSubject).filter(
+        ClassSubject.class_id == payload.class_id,
+        ClassSubject.teacher_id == teacher.id
+    ).first() is not None
+
+    if school_class.teacher_id != teacher.id and not is_subject_teacher and teacher.role != "admin":
         raise HTTPException(status_code=403, detail="អ្នកគ្មានសិទ្ធិកត់ត្រាវត្តមានក្នុងថ្នាក់របស់គ្រូផ្សេងទេ")
 
     parsed_date = datetime.strptime(payload.date, "%Y-%m-%d").date()
+    target_subject = payload.subject.strip() if payload.subject and payload.subject.strip() else "ទូទៅ"
     
     for item in payload.records:
         att = db.query(Attendance).filter(
             Attendance.class_id == payload.class_id,
             Attendance.student_id == item.student_id,
+            Attendance.subject == target_subject,
             Attendance.date == parsed_date
         ).first()
         
         if att:
             att.status = item.status
             att.notes = item.notes
+            att.teacher_id = teacher.id
         else:
             new_att = Attendance(
                 class_id=payload.class_id,
                 student_id=item.student_id,
+                teacher_id=teacher.id,
+                subject=target_subject,
                 date=parsed_date,
                 status=item.status,
                 notes=item.notes
@@ -488,19 +557,126 @@ def save_attendance(payload: SaveAttendanceRequest, teacher: User = Depends(requ
             db.add(new_att)
             
     db.commit()
-    return {"success": True, "count": len(payload.records), "date": payload.date}
+    return {"success": True, "count": len(payload.records), "date": payload.date, "subject": target_subject}
 
-@router.get("/grades")
-def get_grades_matrix(class_id: int, teacher: User = Depends(require_teacher), db: Session = Depends(get_db)):
+@router.get("/classes/{class_id}/subjects")
+def get_class_subjects(class_id: int, teacher: User = Depends(require_teacher), db: Session = Depends(get_db)):
+    subjects = db.query(ClassSubject).filter(ClassSubject.class_id == class_id).all()
+    return [
+        {
+            "id": s.id,
+            "class_id": s.class_id,
+            "teacher_id": s.teacher_id,
+            "teacher_name": s.teacher.name if s.teacher else "គ្រូបង្រៀន",
+            "teacher_email": s.teacher.email if s.teacher else "",
+            "subject_name": s.subject_name,
+            "created_at": s.created_at
+        }
+        for s in subjects
+    ]
+
+@router.post("/classes/{class_id}/subjects")
+def assign_class_subject(
+    class_id: int,
+    payload: AssignSubjectTeacherRequest,
+    teacher: User = Depends(require_teacher),
+    db: Session = Depends(get_db)
+):
     school_class = db.query(SchoolClass).filter(SchoolClass.id == class_id).first()
     if not school_class:
         raise HTTPException(status_code=404, detail="រកមិនឃើញថ្នាក់រៀននេះទេ")
     if school_class.teacher_id != teacher.id and teacher.role != "admin":
+        raise HTTPException(status_code=403, detail="មានតែ Admin ឬគ្រូប្រចាំថ្នាក់ទេដែលអាចចាត់តាំងគ្រូតាមមុខវិជ្ជា")
+
+    target_teacher = db.query(User).filter(User.id == payload.teacher_id).first()
+    if not target_teacher or target_teacher.role not in ["teacher", "admin"]:
+        raise HTTPException(status_code=400, detail="សូមជ្រើសរើសគណនីគ្រូបង្រៀនត្រឹមត្រូវ")
+
+    subj_name = payload.subject_name.strip()
+    existing = db.query(ClassSubject).filter(
+        ClassSubject.class_id == class_id,
+        ClassSubject.subject_name == subj_name
+    ).first()
+
+    if existing:
+        existing.teacher_id = target_teacher.id
+        db.commit()
+        return {"success": True, "message": f"បានធ្វើបច្ចុប្បន្នភាពគ្រូបង្រៀនមុខវិជ្ជា {subj_name} ទៅកាន់ {target_teacher.name}"}
+    
+    new_sub = ClassSubject(
+        class_id=class_id,
+        teacher_id=target_teacher.id,
+        subject_name=subj_name
+    )
+    db.add(new_sub)
+    db.commit()
+    db.refresh(new_sub)
+    return {"success": True, "message": f"បានចាត់តាំងលោកគ្រូ/អ្នកគ្រូ {target_teacher.name} បង្រៀនមុខវិជ្ជា {subj_name} ដោយជោគជ័យ"}
+
+@router.delete("/classes/{class_id}/subjects/{subject_id}")
+def delete_class_subject(
+    class_id: int,
+    subject_id: int,
+    teacher: User = Depends(require_teacher),
+    db: Session = Depends(get_db)
+):
+    school_class = db.query(SchoolClass).filter(SchoolClass.id == class_id).first()
+    if not school_class:
+        raise HTTPException(status_code=404, detail="រកមិនឃើញថ្នាក់រៀននេះទេ")
+    if school_class.teacher_id != teacher.id and teacher.role != "admin":
+        raise HTTPException(status_code=403, detail="អ្នកគ្មានសិទ្ធិលុបការចាត់តាំងនេះទេ")
+
+    sub = db.query(ClassSubject).filter(ClassSubject.id == subject_id, ClassSubject.class_id == class_id).first()
+    if not sub:
+        raise HTTPException(status_code=404, detail="រកមិនឃើញមុខវិជ្ជានេះទេ")
+    db.delete(sub)
+    db.commit()
+    return {"success": True, "message": "បានដកការចាត់តាំងមុខវិជ្ជាដោយជោគជ័យ"}
+
+@router.get("/grades")
+def get_grades_matrix(
+    class_id: int,
+    subject: Optional[str] = None,
+    teacher: User = Depends(require_teacher),
+    db: Session = Depends(get_db)
+):
+    school_class = db.query(SchoolClass).filter(SchoolClass.id == class_id).first()
+    if not school_class:
+        raise HTTPException(status_code=404, detail="រកមិនឃើញថ្នាក់រៀននេះទេ")
+
+    is_homeroom = (school_class.teacher_id == teacher.id) or (teacher.role == "admin")
+
+    # Get subjects this teacher is assigned to in this class
+    assigned_subjects = [
+        cs.subject_name for cs in db.query(ClassSubject).filter(
+            ClassSubject.class_id == class_id,
+            ClassSubject.teacher_id == teacher.id
+        ).all()
+    ]
+    is_subject_teacher = len(assigned_subjects) > 0
+
+    if not is_homeroom and not is_subject_teacher:
         raise HTTPException(status_code=403, detail="អ្នកគ្មានសិទ្ធិមើលពិន្ទុថ្នាក់របស់គ្រូផ្សេងទេ")
 
     enrollments = db.query(Enrollment).filter(Enrollment.class_id == class_id).order_by(Enrollment.roll_no.asc()).all()
-    all_grades = db.query(Grade).filter(Grade.class_id == class_id).order_by(Grade.date.desc()).all()
-    
+
+    # Determine which subjects to show based on role
+    grades_query = db.query(Grade).filter(Grade.class_id == class_id)
+    if not is_homeroom and is_subject_teacher:
+        # Subject teacher: only see their assigned subjects
+        if subject and subject.strip():
+            # Filter requested subject — must be in their assigned list
+            subj = subject.strip()
+            if subj not in assigned_subjects:
+                raise HTTPException(status_code=403, detail="អ្នកគ្មានសិទ្ធិមើលពិន្ទុមុខវិជ្ជានេះទេ")
+            grades_query = grades_query.filter(Grade.subject == subj)
+        else:
+            grades_query = grades_query.filter(Grade.subject.in_(assigned_subjects))
+    elif subject and subject.strip():
+        grades_query = grades_query.filter(Grade.subject == subject.strip())
+
+    all_grades = grades_query.order_by(Grade.date.desc()).all()
+
     student_scores = {}
     for e in enrollments:
         s = e.student
@@ -516,12 +692,12 @@ def get_grades_matrix(class_id: int, teacher: User = Depends(require_teacher), d
             }
             for g in all_grades if g.student_id == s_id
         ]
-        
+
         if s_grades:
             avg = float(sum(g["score"] for g in s_grades) / len(s_grades))
         else:
             avg = 0.0
-            
+
         student_scores[s_id] = {
             "student_id": s.id,
             "name": s.name,
@@ -529,21 +705,198 @@ def get_grades_matrix(class_id: int, teacher: User = Depends(require_teacher), d
             "roll_no": e.roll_no,
             "grades": s_grades,
             "average": round(avg, 2),
-            "letter_grade": "A" if avg >= 90 else ("B" if avg >= 80 else ("C" if avg >= 70 else ("D" if avg >= 60 else ("E" if avg >= 50 else "F"))))
+            "letter_grade": "A" if avg >= 90 else ("B" if avg >= 80 else ("C" if avg >= 70 else ("D" if avg >= 60 else ("E" if avg >= 50 else "F")))),
+            "assigned_subjects": assigned_subjects if is_subject_teacher and not is_homeroom else None
         }
-        
+
     ranked = sorted(student_scores.values(), key=lambda x: x["average"], reverse=True)
     for rank, item in enumerate(ranked, start=1):
         item["rank"] = rank if item["average"] > 0 else "-"
-        
+
     return sorted(ranked, key=lambda x: x["roll_no"] if x["roll_no"] is not None else 0)
+
+
+@router.get("/rankings")
+def get_rankings(
+    scope: str,  # 'class', 'subject', 'school'
+    class_id: Optional[int] = None,
+    subject: Optional[str] = None,
+    grade_level: Optional[str] = None,
+    teacher: User = Depends(require_teacher),
+    db: Session = Depends(get_db)
+):
+    """Rankings endpoint supporting three scopes:
+    - scope=class: rank students by overall average within a class
+    - scope=subject: rank students by a specific subject within a class
+    - scope=school: rank all students of a given grade_level across all classes
+    """
+    def letter(avg):
+        if avg >= 90: return "A"
+        elif avg >= 80: return "B"
+        elif avg >= 70: return "C"
+        elif avg >= 60: return "D"
+        elif avg >= 50: return "E"
+        return "F"
+
+    if scope == "class":
+        if not class_id:
+            raise HTTPException(status_code=400, detail="ត្រូវការ class_id")
+        school_class = db.query(SchoolClass).filter(SchoolClass.id == class_id).first()
+        if not school_class:
+            raise HTTPException(status_code=404, detail="រកមិនឃើញថ្នាក់រៀននេះទេ")
+
+        # Access check
+        is_homeroom = (school_class.teacher_id == teacher.id) or (teacher.role == "admin")
+        assigned_subjects = [cs.subject_name for cs in db.query(ClassSubject).filter(
+            ClassSubject.class_id == class_id, ClassSubject.teacher_id == teacher.id
+        ).all()]
+        if not is_homeroom and not assigned_subjects:
+            raise HTTPException(status_code=403, detail="អ្នកគ្មានសិទ្ធិមើលចំណាត់ថ្នាក់ក្នុងថ្នាក់នេះទេ")
+
+        enrollments = db.query(Enrollment).filter(Enrollment.class_id == class_id).all()
+        grades_query = db.query(Grade).filter(Grade.class_id == class_id)
+        if not is_homeroom:
+            grades_query = grades_query.filter(Grade.subject.in_(assigned_subjects))
+        all_grades = grades_query.all()
+
+        results = []
+        for e in enrollments:
+            s_grades = [g for g in all_grades if g.student_id == e.student_id]
+            avg = float(sum(float(g.score) for g in s_grades) / len(s_grades)) if s_grades else 0.0
+            results.append({
+                "student_id": e.student_id,
+                "name": e.student.name,
+                "student_code": e.student.student_code,
+                "roll_no": e.roll_no,
+                "class_name": school_class.name,
+                "grade_level": school_class.grade_level,
+                "average": round(avg, 2),
+                "letter_grade": letter(avg),
+                "subject_scores": [
+                    {"subject": g.subject, "score": float(g.score)}
+                    for g in s_grades
+                ]
+            })
+
+        results.sort(key=lambda x: x["average"], reverse=True)
+        for i, r in enumerate(results, 1):
+            r["rank"] = i if r["average"] > 0 else "-"
+        return {"scope": "class", "class_name": school_class.name, "grade_level": school_class.grade_level, "results": results}
+
+    elif scope == "subject":
+        if not class_id or not subject:
+            raise HTTPException(status_code=400, detail="ត្រូវការ class_id និង subject")
+        school_class = db.query(SchoolClass).filter(SchoolClass.id == class_id).first()
+        if not school_class:
+            raise HTTPException(status_code=404, detail="រកមិនឃើញថ្នាក់រៀននេះទេ")
+
+        is_homeroom = (school_class.teacher_id == teacher.id) or (teacher.role == "admin")
+        assigned_subjects = [cs.subject_name for cs in db.query(ClassSubject).filter(
+            ClassSubject.class_id == class_id, ClassSubject.teacher_id == teacher.id
+        ).all()]
+        subj = subject.strip()
+        if not is_homeroom and subj not in assigned_subjects:
+            raise HTTPException(status_code=403, detail="អ្នកគ្មានសិទ្ធិមើលចំណាត់ថ្នាក់មុខវិជ្ជានេះទេ")
+
+        enrollments = db.query(Enrollment).filter(Enrollment.class_id == class_id).all()
+        grades = db.query(Grade).filter(Grade.class_id == class_id, Grade.subject == subj).all()
+        grade_map = {g.student_id: float(g.score) for g in grades}
+
+        results = []
+        for e in enrollments:
+            score = grade_map.get(e.student_id, None)
+            results.append({
+                "student_id": e.student_id,
+                "name": e.student.name,
+                "student_code": e.student.student_code,
+                "roll_no": e.roll_no,
+                "class_name": school_class.name,
+                "grade_level": school_class.grade_level,
+                "score": round(score, 2) if score is not None else None,
+                "letter_grade": letter(score) if score is not None else "-"
+            })
+
+        results.sort(key=lambda x: (x["score"] is None, -(x["score"] or 0)))
+        for i, r in enumerate(results, 1):
+            r["rank"] = i if r["score"] is not None else "-"
+        return {"scope": "subject", "subject": subj, "class_name": school_class.name, "grade_level": school_class.grade_level, "results": results}
+
+    elif scope == "school":
+        # School-wide ranking across all classes of a given grade_level
+        # Only accessible to homeroom/admin teachers or subject teachers in that grade
+        if not grade_level:
+            raise HTTPException(status_code=400, detail="ត្រូវការ grade_level")
+
+        if teacher.role == "admin":
+            classes = db.query(SchoolClass).filter(SchoolClass.grade_level == grade_level).all()
+        else:
+            # Teachers can see school-wide ranking only for grade levels they teach
+            teacher_class_ids = [c.id for c in db.query(SchoolClass).filter(SchoolClass.teacher_id == teacher.id).all()]
+            subject_class_ids = [cs.class_id for cs in db.query(ClassSubject).filter(ClassSubject.teacher_id == teacher.id).all()]
+            all_accessible_class_ids = list(set(teacher_class_ids + subject_class_ids))
+            classes = db.query(SchoolClass).filter(
+                SchoolClass.grade_level == grade_level,
+                SchoolClass.id.in_(all_accessible_class_ids)
+            ).all()
+
+        if not classes:
+            raise HTTPException(status_code=404, detail="រកមិនឃើញថ្នាក់នៅថ្នាក់ទីនេះទេ")
+
+        class_ids = [c.id for c in classes]
+        class_map = {c.id: c for c in classes}
+
+        all_enrollments = db.query(Enrollment).filter(Enrollment.class_id.in_(class_ids)).all()
+        all_grades_q = db.query(Grade).filter(Grade.class_id.in_(class_ids))
+        if subject and subject.strip():
+            all_grades_q = all_grades_q.filter(Grade.subject == subject.strip())
+        all_grades = all_grades_q.all()
+
+        student_grade_map = {}
+        for g in all_grades:
+            if g.student_id not in student_grade_map:
+                student_grade_map[g.student_id] = []
+            student_grade_map[g.student_id].append(float(g.score))
+
+        results = []
+        seen_students = set()
+        for e in all_enrollments:
+            if e.student_id in seen_students:
+                continue
+            seen_students.add(e.student_id)
+            scores = student_grade_map.get(e.student_id, [])
+            avg = float(sum(scores) / len(scores)) if scores else 0.0
+            cls = class_map.get(e.class_id)
+            results.append({
+                "student_id": e.student_id,
+                "name": e.student.name,
+                "student_code": e.student.student_code,
+                "roll_no": e.roll_no,
+                "class_name": cls.name if cls else "",
+                "grade_level": grade_level,
+                "average": round(avg, 2),
+                "letter_grade": letter(avg)
+            })
+
+        results.sort(key=lambda x: x["average"], reverse=True)
+        for i, r in enumerate(results, 1):
+            r["rank"] = i if r["average"] > 0 else "-"
+        return {"scope": "school", "grade_level": grade_level, "subject": subject or "ទាំងអស់", "results": results}
+
+    else:
+        raise HTTPException(status_code=400, detail="scope ត្រូវជា class, subject, ឬ school")
 
 @router.post("/grades")
 def save_grades(payload: SaveGradesRequest, teacher: User = Depends(require_teacher), db: Session = Depends(get_db)):
     school_class = db.query(SchoolClass).filter(SchoolClass.id == payload.class_id).first()
     if not school_class:
         raise HTTPException(status_code=404, detail="រកមិនឃើញថ្នាក់រៀននេះទេ")
-    if school_class.teacher_id != teacher.id and teacher.role != "admin":
+
+    is_subject_teacher = db.query(ClassSubject).filter(
+        ClassSubject.class_id == payload.class_id,
+        ClassSubject.teacher_id == teacher.id
+    ).first() is not None
+
+    if school_class.teacher_id != teacher.id and not is_subject_teacher and teacher.role != "admin":
         raise HTTPException(status_code=403, detail="អ្នកគ្មានសិទ្ធិកត់ត្រាពិន្ទុក្នុងថ្នាក់របស់គ្រូផ្សេងទេ")
 
     parsed_date = datetime.strptime(payload.date, "%Y-%m-%d").date()

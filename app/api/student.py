@@ -116,28 +116,39 @@ def get_student_dashboard(student: User = Depends(require_student), db: Session 
 
 @router.get("/attendance")
 def get_student_attendance(student: User = Depends(require_student), db: Session = Depends(get_db)):
-    """Strict data isolation: student can only fetch their own attendance records."""
+    """
+    Strict data isolation — filter by student.id only.
+    A student CANNOT see attendance records of any other student.
+    Returns only this student's own records, sorted newest first.
+    """
     records = db.query(Attendance).filter(
-        Attendance.student_id == student.id
+        Attendance.student_id == student.id          # hard-coded to current user
     ).order_by(Attendance.date.desc()).all()
-    
+
     return [
         {
             "date": str(record.date),
-            "status": record.status,
+            "status": record.status,            # present | absent | permission | late
             "notes": record.notes,
-            "created_at": record.created_at
+            "created_at": record.created_at.isoformat() if record.created_at else None,
         }
         for record in records
     ]
 
 @router.get("/grades")
 def get_student_grades(student: User = Depends(require_student), db: Session = Depends(get_db)):
-    """Strict data isolation: student can only fetch their own grades."""
-    records = db.query(Grade).join(SchoolClass, Grade.class_id == SchoolClass.id).filter(
-        Grade.student_id == student.id
-    ).order_by(Grade.date.desc(), Grade.subject.asc()).all()
-    
+    """
+    Strict data isolation — filter by student.id only.
+    Returns this student's own grades with full date and class info.
+    """
+    records = (
+        db.query(Grade)
+        .join(SchoolClass, Grade.class_id == SchoolClass.id)
+        .filter(Grade.student_id == student.id)          # hard-coded to current user
+        .order_by(Grade.date.desc(), Grade.subject.asc())
+        .all()
+    )
+
     return [
         {
             "id": record.id,
@@ -145,8 +156,10 @@ def get_student_grades(student: User = Depends(require_student), db: Session = D
             "exam_type": record.exam_type,
             "score": float(record.score),
             "max_score": float(record.max_score),
-            "date": str(record.date),
-            "class_name": record.school_class.name if record.school_class else ""
+            # Full ISO date string so frontend can format it any way it wants
+            "date": str(record.date),            # e.g. "2026-09-12"
+            "class_name": record.school_class.name if record.school_class else "",
+            "grade_level": record.school_class.grade_level if record.school_class else "",
         }
         for record in records
     ]
