@@ -42,4 +42,4 @@ services:
         sync: false
       # ── CORS — set frontend Render URL after frontend is deployed ─────────
       - key: ALLOWED_ORIGINS
-        value: "https://smart-school-frontend.onrender.com,http://localhost:3000"
+        value: "https://smart-school-frontend.onrender.com,https://student-attendance-front.onrender.com,http://localhost:3000"

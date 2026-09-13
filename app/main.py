@@ -22,14 +22,14 @@ app = FastAPI(
 # Fallback includes localhost for local development.
 _raw_origins = os.getenv(
     "ALLOWED_ORIGINS",
-    "http://localhost:3000,http://127.0.0.1:3000",
+    "http://localhost:3000,http://127.0.0.1:3000,https://student-attendance-front.vercel.app",
 )
 _allowed_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
-    allow_origin_regex=r"https://.*\.onrender\.com",   # allow any Render subdomain
+    allow_origin_regex=r"https://.*\.(onrender\.com|vercel\.app)",   # allow Render + Vercel subdomains
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
