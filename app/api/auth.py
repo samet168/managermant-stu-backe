@@ -36,6 +36,14 @@ def request_otp(payload: SendOTPRequest, db: Session = Depends(get_db)):
     db.commit()
     
     dispatch_result = send_otp_via_brevo(email, otp_code)
+
+    if not dispatch_result.get("success"):
+        safe_err = (dispatch_result.get("error") or "").encode("ascii", errors="replace").decode("ascii")
+        print(f"[OTP_SEND_FAILED] {email}: {safe_err}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="ការផ្ញើលេខកូដ OTP បរាជ័យ — សូមពិនិត្យការកំណត់ SMTP នៅលើ Render (Failed to send OTP email — check SMTP settings)"
+        )
     
     response = {
         "success": True,
