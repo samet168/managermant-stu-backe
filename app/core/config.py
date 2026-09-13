@@ -22,13 +22,14 @@ class Settings:
     DEV_SHOW_OTP: bool = os.getenv("DEV_SHOW_OTP", "true").lower() == "true"
 
     # ── Brevo / SMTP ────────────────────────────────────────────────────────
-    # Set these in .env — never commit real keys
+    # Set these in .env / Render Environment Variables
+    BREVO_API_KEY: str = os.getenv("BREVO_API_KEY", "")
     SMTP_SERVER: str = os.getenv("SMTP_SERVER", "smtp-relay.brevo.com")
-    SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
+    SMTP_PORT: int = int(os.getenv("SMTP_PORT", "465"))
     SMTP_KEY: str = os.getenv("SMTP_KEY", "")
     SMTP_USER: str = os.getenv("SMTP_USER", "")
     SMTP_FROM: str = os.getenv("SMTP_FROM", "")
-    SMTP_FROM_NAME: str = os.getenv("SMTP_FROM_NAME", "Smart School")
+    SMTP_FROM_NAME: str = os.getenv("SMTP_FROM_NAME", "សាលារៀនឌីជីថល (Smart School)")
 
     # ── Cloudinary ──────────────────────────────────────────────────────────
     # Set these in .env — never commit real keys
