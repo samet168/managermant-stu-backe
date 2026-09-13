@@ -1,0 +1,45 @@
+services:
+  - type: web
+    name: smart-school-backend
+    runtime: python
+    region: singapore          # closest to Cambodia
+    plan: free
+    rootDir: .
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      # ── Copy these values from your .env file into Render Dashboard ──────
+      - key: DATABASE_URL
+        sync: false            # set manually in Render Dashboard (secret)
+      - key: SECRET_KEY
+        sync: false
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: "10080"
+      - key: DEV_SHOW_OTP
+        value: "false"         # IMPORTANT: false in production
+      # ── Brevo SMTP ────────────────────────────────────────────────────────
+      - key: SMTP_SERVER
+        value: smtp-relay.brevo.com
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_KEY
+        sync: false            # set manually in Render Dashboard
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+      - key: SMTP_FROM_NAME
+        value: "Smart School"
+      # ── Cloudinary ────────────────────────────────────────────────────────
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+      - key: CLOUDINARY_URL
+        sync: false
+      # ── CORS — set frontend Render URL after frontend is deployed ─────────
+      - key: ALLOWED_ORIGINS
+        value: "https://smart-school-frontend.onrender.com,http://localhost:3000"
