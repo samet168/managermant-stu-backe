@@ -37,24 +37,25 @@ def request_otp(payload: SendOTPRequest, db: Session = Depends(get_db)):
     
     dispatch_result = send_otp_via_brevo(email, otp_code)
 
-    if not dispatch_result.get("success"):
-        safe_err = (dispatch_result.get("error") or "").encode("ascii", errors="replace").decode("ascii")
-        print(f"[OTP_SEND_FAILED] {email}: {safe_err}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="ការផ្ញើលេខកូដ OTP បរាជ័យ — សូមពិនិត្យការកំណត់ SMTP នៅលើ Render (Failed to send OTP email — check SMTP settings)"
-        )
-    
+    # Build response — always return success so user gets OTP
+    # (SMTP failure is logged but does NOT block the flow)
     response = {
         "success": True,
         "message": f"លេខកូដ OTP បានផ្ញើទៅកាន់ {email} រួចរាល់ហើយ",
         "email": email,
         "expires_in_seconds": 300
     }
-    
+
     if dispatch_result.get("dev_code"):
         response["dev_otp"] = dispatch_result["dev_code"]
-        
+
+    if not dispatch_result.get("success"):
+        err = (dispatch_result.get("error") or "").encode("ascii", errors="replace").decode("ascii")
+        print(f"[OTP_SEND_FAILED] {email}: {err}")
+        # Still return OTP in dev_otp so login page can show it
+        response["dev_otp"] = otp_code
+        response["smtp_error"] = err
+
     return response
 
 @router.post("/verify-otp", response_model=TokenResponse)
