@@ -12,7 +12,7 @@ class Settings:
     API_V1_STR: str = "/api/v1"
 
     # ── Database ────────────────────────────────────────────────────────────
-    # Set DATABASE_URL in .env — never hardcode credentials here
+    # Set DATABASE_URL in .env / Render Environment Variables
     DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 
     # ── JWT & Auth ──────────────────────────────────────────────────────────
@@ -32,7 +32,7 @@ class Settings:
     SMTP_FROM_NAME: str = os.getenv("SMTP_FROM_NAME", "សាលារៀនឌីជីថល (Smart School)")
 
     # ── Cloudinary ──────────────────────────────────────────────────────────
-    # Set these in .env — never commit real keys
+    # Set these in .env / Render Environment Variables
     CLOUDINARY_CLOUD_NAME: str = os.getenv("CLOUDINARY_CLOUD_NAME", "")
     CLOUDINARY_API_KEY: str = os.getenv("CLOUDINARY_API_KEY", "")
     CLOUDINARY_API_SECRET: str = os.getenv("CLOUDINARY_API_SECRET", "")
